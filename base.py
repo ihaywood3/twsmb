@@ -1,0 +1,65 @@
+# Copyright (c) Twisted Matrix Laboratories.
+# See LICENSE for details.
+
+"""
+base classes for SMB networking
+"""
+
+from __future__ import absolute_import, division
+
+import struct
+import binascii
+
+from zope.interface import implementer
+
+from twisted.internet import protocol, interfaces
+
+
+
+class SMBPacketReceiver(protocol.Protocol):
+    """
+    basic SMB 2.0 packets over TCP have a 4-byte header: null byte 
+    and 24-bit length field
+    this base class processes these headers
+    """
+    def __init__(self, factory):
+        self.factory = factory
+        self.data = b''
+        
+    def dataReceived(self, data):
+        self.data += data
+        self._processData()
+        
+    def _processData(self):
+        if len(self.data) < 5:
+            return
+        x, y = struct.unpack("!xBH", self.data)
+        size = (x << 16) + y
+        if len(self.data) < size+4:
+            return
+        self.packetReceived(self.data[4:4+size])
+        self.data = self.data[4+size:]
+        self._processData()
+
+    def sendPacket(self, data):
+        """
+        send data with 4 byte header
+        
+        @param dara: packet to send
+        @type data: L{bytes}
+        """
+        size = len(data)
+        assert size < 0xffffff
+        x = (size & 0xff0000) >> 16
+        y = size & 0xffff
+        self.transport.write(struct.pack("!BBH", 0, x, y) + data)
+
+     def packetReceived(self, packet):
+         """
+         called for each complete packet received over network
+         override in descendants
+         
+         @param packet: raw packet data
+         @type packet: L{bytes}
+         """
+         pass
