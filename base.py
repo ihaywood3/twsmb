@@ -14,7 +14,42 @@ from zope.interface import implementer
 
 from twisted.internet import protocol, interfaces
 
+class SMBError(Exception):
+    """SMB specific errors
+    """
+    def __init__(self, msg, ntstatus=0xC0000001):
+        self.msg = msg
+        self.ntstatus = ntstatus
 
+    def __str__(self):
+        return "%s 0x%08x" % (self.msg, self.ntstatus)
+
+def u2nt_time(epoch):
+    """
+    Convert UNIX epoch time to NT filestamp
+    quoting from spec: The FILETIME structure is a 64-bit value 
+    that represents the number of 100-nanosecond intervals that
+    have elapsed since January 1, 1601, Coordinated Universal Time
+    """
+    return long(epoch*10000000.0)+116444736000000000L
+    
+def unpack(fmt, data):
+    """
+    a more ergonnomic struct.unpack,If data is longer than the fmt spec it copes
+    remaining data returned as last data element
+
+    @param fmt: format string as per L{struct.unpack}
+    @type fmt: L{str}
+    @param data: data to be unpacked, optionally more
+    @type data: L{bytes}
+
+    @rtype: L{tuple}
+    """
+    sz = struct.calcsize(fmt)
+    ret = struct.unpack(fmt, data[:sz])
+    ret = list(ret)
+    ret.append(data[sz:])
+    return tuple(ret)
 
 class SMBPacketReceiver(protocol.Protocol):
     """
@@ -22,8 +57,7 @@ class SMBPacketReceiver(protocol.Protocol):
     and 24-bit length field
     this base class processes these headers
     """
-    def __init__(self, factory):
-        self.factory = factory
+    def __init__(self):
         self.data = b''
         
     def dataReceived(self, data):
@@ -33,7 +67,7 @@ class SMBPacketReceiver(protocol.Protocol):
     def _processData(self):
         if len(self.data) < 5:
             return
-        x, y = struct.unpack("!xBH", self.data)
+        x, y = struct.unpack("!xBH", self.data[:4])
         size = (x << 16) + y
         if len(self.data) < size+4:
             return
@@ -54,12 +88,12 @@ class SMBPacketReceiver(protocol.Protocol):
         y = size & 0xffff
         self.transport.write(struct.pack("!BBH", 0, x, y) + data)
 
-     def packetReceived(self, packet):
-         """
-         called for each complete packet received over network
-         override in descendants
+    def packetReceived(self, packet):
+        """
+        called for each complete packet received over network
+        override in descendants
          
-         @param packet: raw packet data
-         @type packet: L{bytes}
-         """
-         pass
+        @param packet: raw packet data
+        @type packet: L{bytes}
+        """
+        pass

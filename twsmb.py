@@ -7,34 +7,40 @@ from __future__ import absolute_import, division
 
 import struct
 import binascii
+import logging
+import uuid
+import time
+
+import base
 
 from zope.interface import implementer
-
 from twisted.internet import protocol, interfaces
 
-COMMANDS={
-    0x00:'negotiate',
-    0x01:'session_setup',
-    0x02:'logoff',
-    0x03;'tree_connect',
-    0x04:'tree_disconnect',
-    0x05:'create',
-    0x06:'close',
-    0x07:'flush',
-    0x08:'read',
-    0x09:'write',
-    0x0A:'lock',
-    0x0B:'ioctl',
-    0x0C:'cancel',
-    0x0D:'echo',
-    0x0E:'query_directoty',
-    0x0F:'change_notify',
-    0x10:'query_info',
-    0x11:'set_info',
-    0x12:'oplock_break'}
-INV_COMMANDS={v:k for k, v in COMMANDS.items()}
+log = logging.getLogger(__name__)
 
-# the complete list of statuses is very large, so just
+COMMANDS=[
+    'negotiate',
+    'session_setup',
+    'logoff',
+    'tree_connect',
+    'tree_disconnect',
+    'create',
+    'close',
+    'flush',
+    'read',
+    'write',
+    'lock',
+    'ioctl',
+    'cancel',
+    'echo',
+    'query_directory',
+    'change_notify',
+    'query_info',
+    'set_info',
+    'oplock_break']
+
+
+# the complete list of NT statuses is very large, so just
 # add those actually used
 STATUS_SUCCESS=0x00
 STATUS_MORE_PROCESSING=0xC0000016
@@ -68,12 +74,30 @@ FLAG_REPLAY_OPERATION=0x20000000
 NEGOTIATE_SIGNING_ENABLED=0x0001
 NEGOTIATE_SIGNING_REQUIRED=0x0002
 
+MAX_READ_SIZE=0x20000
+MAX_TRANSACT_SIZE=0x20000
+MAX_WRITE_SIZE=0x20000
+
 
 class SMB(base.SMBPacketReceiver):
     """
     implement SMB protocol server-side
     """ 
     
+    def __init__(self, factory):
+        base.SMBPacketReceiver.__init__(self)
+        self.state = "START"
+        self.factory = factory
+        self.avatar = None
+        aelf.signing_enabled = False
+        self.signing_required = False
+        self.message_id = 0
+        self.tree_id = 0
+        self.session_id = 0
+        self.async_id = 0
+        self.blob_manager = security_blob.BlobManager()
+        
+        
     def packetReceived(self, packet):
         """
         receive a SMB packet with header. Unpacks the 
@@ -83,22 +107,36 @@ class SMB(base.SMBPacketReceiver):
         @param packet: the raw packet
         @type packet: L{bytes}
         """
-        begin_struct = "<4sHH4sHHLLQ"
-        begin_struct_len = struct.calcsize(begin_struct)        
-        (protocol_id, hdr_size, self.credit_charge, 
+        protocol_id = packet[:4]
+        if protocol_id == b"\xFFSMB":
+            # its a SMB1 packet which we dont support with the exception
+            # of the first packet, we try to offer upgrade to SMB2
+            if self.state == "START":
+                self.negotiate_response()
+            else:
+                self.transport.close()
+                log.error("Got SMB1 packet while state = %r" % self.state)
+            return                
+        elif protocol_id != b"\xFESMB":
+            self.transport.close()
+            log.error("Unknown packet type")
+            log.debug(repr(packet[:64]))
+            return            
+        begin_struct = "<4xHH4sHHLLQ"
+        (hdr_size, self.credit_charge, 
         hdr_status, hdr_command, self.credit_request,
         self.hdr_flags, self.next_command,
-        self.message_id) = struct.unpack(begin_struct, packet)
+        self.message_id, rem) = base.unpack(begin_struct, packet)
         self.is_async = (self.hdr_flags & FLAG_ASYNC) > 0
         self.is_related = (self.hdr_flags & FLAG_RELATED) > 0
         self.is_signed = (self.hdr_flags & FLAG_SIGNED) > 0
         # FIXME other flags 3.1 or too obscure
         if self.is_async:
             (self.async_id, self.session_id, 
-            self.signature) = struct.unpack_from("<QQ16s", packet, begin_struct_len)
+            self.signature, rem) = base.unpack("<QQ16s", rem)
         else:
             (_reserved, self.tree_id, self.session_id,
-            self.signature) = struct.unpack_from("<LLQ16s", packet, begin_struct_len)
+            self.signature, rem) = base.unpack("<LLQ16s", rem)
             self.async_id = 0x00
         if self.factory.debug:
             print("HEADER")
@@ -125,14 +163,19 @@ class SMB(base.SMBPacketReceiver):
             else:
                 print("tree ID         0x%x" % self.tree_id)
             print("signature       %s" % binascii.hexlify(self.signature))            
-                      
-        getattr (self, 'smb_'+COMMANDS[hdr_command]) (packet[64:])
- 
+        try:              
+            getattr (self, 'smb_'+COMMANDS[hdr_command]) (packet[64:])
+        except IndexError:
+            log.error("unknown command 0x%02x" % hdr_command)
+            error_response(hdr_command, STATUS_NOT_IMPLEMENTED)
+        except base.SMBError as e:
+            log.error(str(e))
+            error_response(hdr_command, e.ntstatus))
         if self.is_related and self.next_command > 0:
             self.packetReceived(packet[self.next_command:])
             
             
-    def sendHeader(self, command, payload, status=STATUS_SUCCESS):
+    def send_with_header(self, command, payload, status=STATUS_SUCCESS):
         """
         prepare and transmit a SMB header and payload
         so a full packet but focus of function on header construction
@@ -149,9 +192,11 @@ class SMB(base.SMBPacketReceiver):
         # FIXME credit and signatures not supportted
         flags = FLAG_SERVER
         if self.is_async:
-            flags |= FLAG_ASYNC        
+            flags |= FLAG_ASYNC
+        if type(command) is str:
+            command = COMMANDS.index(command)        
         header_data = struct.pack("<4sHHLHHLLQ", b'\xFESMB', 64, 0, status,
-            COMMANDS.index(command), 0, flags, 0,self.message_id)
+           command, 0, flags, 0,self.message_id)
         if self.is_async:
             header_data += struct.pack("<QQ16x", self.async_id, self.session_id)
         else:
@@ -160,11 +205,13 @@ class SMB(base.SMBPacketReceiver):
         
     def smb_negotiate(self, payload):
         (neg_structure_size, dialect_count, security_mode,
-        _reserved, capabilities, self.client_uuid  
-        ) = struct.unpack("<HHHHL16s", payload)
+        _reserved, capabilities, self.client_uuid, _  
+        ) = base.unpack("<HHHHL16s", payload)
         # capabilities is ignored as a 3.1 feature
         # as are final field complex around "negotiate contexts" 
-        dialects = struct.unpack("<%dH" % dialect_count, payload, neg_structure_size)
+        self.client_uuid = uuid.UUID(bytes_le=self.client_uuid)
+        dialects = struct.unpack("<%dH" % dialect_count, 
+            payload[neg_structure_size:neg_structure_size+(dialect_count*2)])
         self.signing_enabled = (security_mode & NEGOTIATE_SIGNING_ENABLED) > 0
         # by spec this should never be false
         self.signing_required = (security_mode & NEGOTIATE_SIGNING_REQUIRED) > 0
@@ -181,7 +228,28 @@ class SMB(base.SMBPacketReceiver):
             print("signing         0x%02x %s" % (security_mode, s))
             print("client UUID     %s" % self.client_uuid)
             print("dialects        %r" % (["0x%04x" % x for x in dialects],))
-  
+        # FIXME do something with dialects
+        # currently server fixed at most basic possible: 0x0202
+        self.negotiate_response()
+    
+    def error_response(self, command, ntstatus):
+        self.send_with_header(command, b'\x09\0\0\0\0\0\0\0', ntstatus)
+        # pre 3.1.1 no variation in structure
+        
+    def negotiate_response(self):
+        blob = self.blob_manager.getInitalBlob()
+        packet = struct.pack("<HHHH16sLLLLQQHHLx", 65, 0, 0x0202, 0, 
+            self.factory.server_uuid.bytes_le,
+            0, MAX_TRANSACT_SIZE, MAX_READ_SIZE, MAX_WRITE_SIZE,  
+            base.u2nt_time(time.time()), 
+            base.u2nt_time(self.factory.server_start),
+            129, #sec blob offset,
+            len(blob),
+            0)
+        self.send_with_header('negotiate', packet+blob)
+        
+
+
 class SMBFactory(protocol.Factory):
     
     def __init__(self, debug=False):
@@ -191,6 +259,8 @@ class SMBFactory(protocol.Factory):
         """
         protocol.Factory.__init__(self)    
         self.debug = debug
+        self.server_uuid = uuid.uuid4()
+        self.server_start = time.time()
         
     def buildProtocol(self, addr):
         return SMB(self)
