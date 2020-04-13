@@ -7,7 +7,6 @@ from __future__ import absolute_import, division
 
 import struct
 import binascii
-import logging
 import uuid
 import time
 
@@ -15,8 +14,9 @@ import base
 
 from zope.interface import implementer
 from twisted.internet import protocol, interfaces
+from twisted.logger import Logger
 
-log = logging.getLogger(__name__)
+log = Logger()
 
 COMMANDS=[
     'negotiate',
@@ -124,7 +124,7 @@ class SMB(base.SMBPacketReceiver):
             return            
         begin_struct = "<4xHH4sHHLLQ"
         (hdr_size, self.credit_charge, 
-        hdr_status, hdr_command, self.credit_request,
+        hdr_status, self.hdr_command, self.credit_request,
         self.hdr_flags, self.next_command,
         self.message_id, rem) = base.unpack(begin_struct, packet)
         self.is_async = (self.hdr_flags & FLAG_ASYNC) > 0
@@ -145,7 +145,7 @@ class SMB(base.SMBPacketReceiver):
             print("size            %d" % hdr_size)
             print("credit charge   %d" % self.credit_charge)
             print("status          %r" % hdr_status)
-            print("command         %s (0x%02x)" % (COMMANDS[hdr_command], hdr_command))
+            print("command         %s (0x%02x)" % (COMMANDS[self.hdr_command], self.lhdr_command))
             print("credit request  %d" % self.credit_request)
             s = ""
             if self.is_async:
@@ -164,24 +164,24 @@ class SMB(base.SMBPacketReceiver):
                 print("tree ID         0x%x" % self.tree_id)
             print("signature       %s" % binascii.hexlify(self.signature))            
         try:              
-            getattr (self, 'smb_'+COMMANDS[hdr_command]) (packet[64:])
+            getattr (self, 'smb_'+COMMANDS[self.hdr_command]) (packet[64:])
         except IndexError:
-            log.error("unknown command 0x%02x" % hdr_command)
-            error_response(hdr_command, STATUS_NOT_IMPLEMENTED)
+            log.error("unknown command 0x%02x" % self.hdr_command)
+            self.error_response(STATUS_NOT_IMPLEMENTED)
         except base.SMBError as e:
             log.error(str(e))
-            error_response(hdr_command, e.ntstatus))
+            self.error_response(e.ntstatus)
         if self.is_related and self.next_command > 0:
             self.packetReceived(packet[self.next_command:])
             
             
-    def send_with_header(self, command, payload, status=STATUS_SUCCESS):
+    def send_with_header(self, payload, command=None, status=STATUS_SUCCESS):
         """
         prepare and transmit a SMB header and payload
         so a full packet but focus of function on header construction
 
-        @param command: command name
-        @type command: L{str}
+        @param command: command name or id, defaults to same as received packet
+        @type command: L{str} or L{int}
         
         @param payload: the after-header data
         @type payload: L{bytes}
@@ -193,6 +193,8 @@ class SMB(base.SMBPacketReceiver):
         flags = FLAG_SERVER
         if self.is_async:
             flags |= FLAG_ASYNC
+        if command is None:
+            command = self.hdr_command
         if type(command) is str:
             command = COMMANDS.index(command)        
         header_data = struct.pack("<4sHHLHHLLQ", b'\xFESMB', 64, 0, status,
@@ -232,22 +234,22 @@ class SMB(base.SMBPacketReceiver):
         # currently server fixed at most basic possible: 0x0202
         self.negotiate_response()
     
-    def error_response(self, command, ntstatus):
-        self.send_with_header(command, b'\x09\0\0\0\0\0\0\0', ntstatus)
+    def error_response(self, ntstatus):
+        self.send_with_header(b'\x09\0\0\0\0\0\0\0', status=ntstatus)
         # pre 3.1.1 no variation in structure
         
     def negotiate_response(self):
         blob = self.blob_manager.getInitalBlob()
-        packet = struct.pack("<HHHH16sLLLLQQHHLx", 65, 0, 0x0202, 0, 
+        packet = struct.pack("<HHHH16sLLLLQQHHL", 65, 0, 0x0202, 0, 
             self.factory.server_uuid.bytes_le,
             0, MAX_TRANSACT_SIZE, MAX_READ_SIZE, MAX_WRITE_SIZE,  
             base.u2nt_time(time.time()), 
             base.u2nt_time(self.factory.server_start),
-            129, #sec blob offset,
+            128, #sec blob offset,
             len(blob),
             0)
-        self.send_with_header('negotiate', packet+blob)
-        
+        self.send_with_header(packet+blob, 'negotiate')
+      $  
 
 
 class SMBFactory(protocol.Factory):

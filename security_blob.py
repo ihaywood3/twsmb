@@ -16,23 +16,41 @@ from __future__ import absolute_import, division
 from pyasn1.type import tag, univ, namedtype, namedval, constraint
 from pyasn1.codec.der import encoder, decoder
 
+from twisted.logger import Logger
+
+log = Logger()
+
+import ntlm
+
 class BlobManager(object):
     """
     encapsulates the authentication negotiation state
     callers just send blobs in and out and get a credential
+    
+    Currently just wraps a NTLMManager and the whole "Matroska doll" design
+    may look silly, but different authentication mechanisms
+    may be added over time
     """
     
-    def getInitialBlob(self):
-
-
-    def _generateNegotiateSecurityBlob(self, ntlm_data):
-        mech_token = univ.OctetString(ntlm_data).subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 2))
+    def __init__(self, domain):
+        """
+        @param domain: the server NetBIOS domain
+        @type domain: L{str}
+        """
+        self.domain = domain
+        
+    def generateInitialBlob(self):
+        """
+        generate greeting blob, fixed data essentially an advertisement
+        we only support NTLM
+        
+        @rtype: L{bytes}
+        """
         mech_types = MechTypeList().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))
         mech_types.setComponentByPosition(0, univ.ObjectIdentifier('1.3.6.1.4.1.311.2.2.10'))
 
         n = NegTokenInit().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))
         n.setComponentByName('mechTypes', mech_types)
-        n.setComponentByName('mechToken', mech_token)
 
         nt = NegotiationToken()
         nt.setComponentByName('negTokenInit', n)
@@ -43,8 +61,73 @@ class BlobManager(object):
 
         return encoder.encode(ct)
 
+    def receiveInitialBlob(self, blob):
+        """
+        process first blob from client
+        
+        @type blob: L{bytes}
+        """
+        d, _ = decoder.decode(blob, asn1Spec=ContextToken())
+        nt = d.getComponentByName('innerContextToken')
+        n = nt.getComponentByName('negTokenInit')
+        token = n.getComponentByName('mechToken')
+        self.manager = ntlm.NTLMManager(self.domain)
+        if token:
+            self.manager.receiveToken(token)        
+        else:
+            log.warn("initial security blob has no token data.")
 
+    def receiveResp(self, blob):
+        """
+        process subsequent blobs from the client
+        
+        @type blob: L{bytes}
+        """   
+        d, _ = decoder.decode(data, asn1Spec = NegotiationToken())
+        nt = d.getComponentByName('negTokenResp')
+        token = nt.getComponentByName('responseToken')
+        if not token:
+            raise base.SMBError('security blob does not contain responseToken field')
+        self.manager.receiveToken(token)
+        
+    def generateChallengeBlob(self):
+        """
+        generates a blob response once initial negotiation is complete
 
+        @rtype: L{bytes}
+        """
+        ntlm_data = self.manager.getChallengeToken()
+       
+        response_token = univ.OctetString(ntlm_data).subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 2))
+        n = NegTokenResp().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1))
+        n.setComponentByName('responseToken', response_token)
+        n.setComponentByName('negResult', RESULT_ACCEPT_INCOMPLETE)
+        nt = NegotiationToken()
+        nt.setComponentByName('negTokenResp', n)
+
+        return encoder.encode(nt)
+
+    def generateAuthResponseBlob(self, login_status):
+        """
+        generate the final blob indicating login status
+
+        @param login_status: C{True} if successful login
+        @type login_status: L{bool}
+        """
+        if login_status:
+            result = RESULT_ACCEPT_COMPLETED
+        else:
+            result = RESULT_REJECT
+        n = NegTokenResp().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1))
+        n.setComponentByName('negResult', result)
+        nt = NegotiationToken()
+        nt.setComponentByName('negTokenResp', n)
+
+        return encoder.encode(nt)
+
+    @property
+    def credential(self):
+        return self.manager.credential    
 #
 # GSS-API ASN.1 (RFC2478 section 3.2.1)
 #
@@ -87,7 +170,7 @@ class NegTokenInit(univ.Sequence):
     )
 
 
-class NegTokenTarg(univ.Sequence):
+class NegTokenResp(univ.Sequence):
     componentType = namedtype.NamedTypes(
         namedtype.OptionalNamedType('negResult', NegResultEnumerated().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))),
         namedtype.OptionalNamedType('supportedMech', univ.ObjectIdentifier().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1))),
@@ -99,7 +182,7 @@ class NegTokenTarg(univ.Sequence):
 class NegotiationToken(univ.Choice):
     componentType = namedtype.NamedTypes(
         namedtype.NamedType('negTokenInit', NegTokenInit().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))),
-        namedtype.NamedType('negTokenTarg', NegTokenTarg().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1)))
+        namedtype.NamedType('negTokenResp', NegTokenResp().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1)))
     )
 
 

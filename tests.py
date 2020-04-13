@@ -1,6 +1,6 @@
 import sys
-sys.path.append("/home/ian/Twisted/src")
-sys.path.append("/home/ian/twsmb")
+import os.path
+sys.path.append(os.path.expanduser("~/twsmb")) # FIXME trial won't add to path
 
 import struct
 import time
@@ -12,6 +12,7 @@ import io
 import twsmb
 import base
 
+# Mike Teo's pysmb: used to make test connections
 from smb.SMBConnection import SMBConnection
 
 from twisted.trial import unittest
@@ -60,7 +61,7 @@ def backgd(self):
 def run_pysmb(self):
     endpoint = TCP4ServerEndpoint(reactor, 8445)
     endpoint.listen(twsmb.SMBFactory(debug=True))
-    backgd_thread = threading.Thread(target=self.backgd)
+    backgd_thread = threading.Thread(target=backgd)
     backgd_thread.start()
     reactor.run()
 

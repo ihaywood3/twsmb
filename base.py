@@ -13,6 +13,9 @@ import binascii
 from zope.interface import implementer
 
 from twisted.internet import protocol, interfaces
+from twisted.logger import Logger
+
+log = Logger()
 
 class SMBError(Exception):
     """SMB specific errors
@@ -31,7 +34,7 @@ def u2nt_time(epoch):
     that represents the number of 100-nanosecond intervals that
     have elapsed since January 1, 1601, Coordinated Universal Time
     """
-    return long(epoch*10000000.0)+116444736000000000L
+    return long(epoch*10000000.0)+116444736000000000
     
 def unpack(fmt, data):
     """
