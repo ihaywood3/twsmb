@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 import sys
 import os.path
 sys.path.append(os.path.expanduser("~/twsmb")) # FIXME trial won't add to path
@@ -11,13 +13,24 @@ import io
 
 import twsmb
 import base
+from realm import TestRealm
 
 # Mike Teo's pysmb: used to make test connections
 from smb.SMBConnection import SMBConnection
 
+from twisted.cred import portal, checkers, credentials
 from twisted.trial import unittest
 from twisted.internet.endpoints import TCP4ServerEndpoint
 from twisted.internet import reactor
+from twisted.logger import globalLogBeginner, textFileLogObserver, Logger
+from twisted.internet.protocol import ProcessProtocol 
+from twisted.internet.defer import Deferred
+from twisted.python.failure import Failure
+
+log = Logger()
+observers = [textFileLogObserver(sys.stdout)]
+globalLogBeginner.beginLoggingTo(observers)
+
 
 class SMBTest(unittest.TestCase):
 
@@ -41,7 +54,7 @@ class SMBTest(unittest.TestCase):
         pr.dataReceived(b'\0\0\0\x03abc')
         self.assertEqual(rdata, b'abc')
 
-def backgd(self):
+def backgd():
     time.sleep(1)
     conn = SMBConnection("user", "password", "client", "server",
          use_ntlm_v2 = True,
@@ -58,15 +71,94 @@ def backgd(self):
         reactor.stop()
 
 
-def run_pysmb(self):
+def run_pysmb():
     endpoint = TCP4ServerEndpoint(reactor, 8445)
-    endpoint.listen(twsmb.SMBFactory(debug=True))
+    endpoint.listen(twsmb.SMBFactory(None))
     backgd_thread = threading.Thread(target=backgd)
     backgd_thread.start()
     reactor.run()
 
-if __name__=='__main__':
-    #run_pysmb()
-    pdb.set_trace()
-    backgd()
-        
+class ChatNotFinished(Exception): pass
+
+class ChatProcess(ProcessProtocol):
+    def __init__(self, chat):
+        self.chat = chat
+        self.d = Deferred()
+        self.matches = []
+         
+     
+    def outReceived(self, data):
+        data = data.decode("utf-8")
+        print(data)
+        if self.chat:
+            prompt, reply = self.chat[0]
+            m = re.search(prompt, data)
+            if m:
+                self.matches.append(m)
+                if reply:
+                    for i in range(1, 10):
+                        t = "\\%d" % i
+                        if t in reply:
+                            reply = reply.replace(t, m.group(i))
+                    self.transport.write(reply.encode('utf-8'))
+                else:
+                    self.transport.closeStdin()
+                del self.chat[0]
+                 
+    def errReceived(self, data):
+        print(data.decode("utf-8"))
+ 
+    def processEnded(self, status):
+        if status.value.exitCode != 0:
+            self.d.errback(status)
+        elif self.chat:
+            try:
+                raise ChatNotFinished()
+            except:
+                self.d.errback(Failure())
+        else:
+            self.d.callback(self.matches)
+
+
+def spawn(chat, args, usePTY=True):
+    pro = ChatProcess(chat)
+    reactor.spawnProcess(pro, args[0], args, usePTY=usePTY)
+    return pro.d 
+ 
+class SambaClientTests(unittest.TestCase): 
+    def setUp(self):
+        # Start the server
+        r = TestRealm()
+        p = portal.Portal(r)
+        users_checker = checkers.InMemoryUsernamePasswordDatabaseDontUse()
+        self.username = "user"
+        self.password = "test-password"
+        users_checker.addUser(self.username, self.password)
+        p.registerChecker(users_checker, credentials.IUsernameHashedPassword)
+        self.factory = twsmb.SMBFactory(p)
+        self.port = port = reactor.listenTCP(
+            445, self.factory)
+        self.addCleanup(port.stopListening)
+        self.addCleanup(r.shutdown)
+
+    def test_login(self):
+        return spawn([], ["/usr/bin/smbclient", 
+                          "\\\\mintbox\\x", self.password,
+                          "-m", "SMB2",
+                          "-U", self.username,
+                          "-I", "127.0.0.1",
+                          "-d", "10"],
+                         usePTY=True)
+
+
+
+
+
+
+
+
+
+
+
+
+

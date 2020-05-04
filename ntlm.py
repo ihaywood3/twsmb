@@ -61,6 +61,7 @@ FLAGS = {
 }
 
 DEFAULT_FLAGS={"NegotiateUnicode",
+             "NegotiateSign",
              "RequestTarget",
              "NegotiateNTLM",
              "NegotiateAlwaysSign",
@@ -127,8 +128,8 @@ AV_TARGET_NAME=0x0009
 AV_CHANNEL_BINDINGS=0x000A
 
   
-SERVER_VERSION=(6, 0, 1) 
-# major version 6 = Vista, roughly speaking what this emulates
+SERVER_VERSION=(6, 1, 1) 
+# major version 6.1 = Vista, roughly speaking what this emulates
 
  
 class NTLMManager(object):
@@ -147,7 +148,7 @@ class NTLMManager(object):
         """
         self.credential = None
         self.flags = DEFAULT_FLAGS
-        self.server_domain= domain
+        self.server_domain = domain
         
     def receiveToken(self, token):
         """
@@ -180,9 +181,9 @@ class NTLMManager(object):
         v_major, v_minor, v_build, v_protocol, _
         ) = base.unpack("<LHHLHHLBBHxxxB", data)
         flags = flags2set(flags)
-        log.debug("NTLM NEGOTIATE")
+        log.info("NTLM NEGOTIATE")
         log.debug("--------------")
-        log.debug("Flags           %r" % flags)
+        log.debug("Flags           %r" % list(flags))
         if 'NegotiateVersion' in flags:
             log.debug("Version         %d.%d (%d) 0x%02x" % (
             v_major, v_minor, v_build, v_protocol))
@@ -200,7 +201,7 @@ class NTLMManager(object):
         else:
             self.workstation = None
         self.flags = DEFAULT_FLAGS & flags
-        if 'NegotiateAlwaysSign' not in self.flags:
+        if 'NegotiateAlwaysSign' not in self.flags and 'NegotiateSign' not in self.flags:
             self.flags -= {'Negotiate128', 'Negotiate56'}
         if 'RequestTarget' in self.flags:
             self.flags.add('TargetTypeServer')
@@ -214,13 +215,14 @@ class NTLMManager(object):
         FORMAT= '<8sIHHII8s8xHHIBBHxxxB'
         header_len=struct.calcsize(FORMAT)
         if 'RequestTarget' in self.flags:
-            target = socket.gethostname().encode('utf-16le')
+            target = socket.gethostname().upper().encode('utf-16le')
         else:
             target = b''
         if 'NegotiateTargetInfo' in self.flags:
-            targetinfo = avpair(AV_COMPUTER_NAME, socket.gethostname()) + \
+            targetinfo = avpair(AV_COMPUTER_NAME, socket.gethostname().upper()) + \
                 avpair(AV_DOMAIN_NAME, self.server_domain) + \
                 avpair(AV_DNS_COMPUTER_NAME, socket.getfqdn()) + \
+                avpair(AV_DNS_DOMAIN_NAME, b'\0\0') + \
                 avpair(AV_TIMESTAMP, struct.pack("<Q", base.u2nt_time(time.time()))) + \
                 avpair(AV_EOL, b'')
         else:
@@ -279,7 +281,7 @@ class NTLMManager(object):
             user = user.decode('utf-16le')
         else:
             raise smb.SMBError("username is required") 
-       if workstation_len > 0:
+        if workstation_len > 0:
             workstation = self.token[workstation_offset:workstation_offset+workstation_len]
             workstation = workstation.decode('utf-16le')
         else:
@@ -316,6 +318,9 @@ class NTLMCredential(object):
         self.lm = lm
         self.nt = nt
         self.challenge = challenge
+    
+    def __repr__(self):
+        return "%s/%s" % (self.username, self.domain)
         
     def checkPassword(self, password):
         # code adapted from pysmb ntlm.py
@@ -323,7 +328,7 @@ class NTLMCredential(object):
         d.update(password.encode('UTF-16LE'))
         ntlm_hash = d.digest()   # The NT password hash
         response_key = hmac.new(ntlm_hash, (self.username.upper() + self.domain).encode('UTF-16LE'), 'md5').digest()  # The NTLMv2 password hash. In [MS-NLMP], this is the result of NTOWFv2 and LMOWFv2 functions 
-        if self.lm:
+        if self.lm and self.lm['response'] != b'\0'*16:
             new_resp = hmac.new(response_key, self.challenge + self.lm['client_challenge'], 'md5').digest() 
             if new_resp != self.lm['response']:
                 return False

@@ -34,7 +34,7 @@ def u2nt_time(epoch):
     that represents the number of 100-nanosecond intervals that
     have elapsed since January 1, 1601, Coordinated Universal Time
     """
-    return long(epoch*10000000.0)+116444736000000000
+    return int(epoch*10000000.0)+116444736000000000
     
 def unpack(fmt, data):
     """

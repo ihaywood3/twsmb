@@ -13,7 +13,7 @@ much of code adapted from Mike Teo's pysmb """
 from __future__ import absolute_import, division
 
 
-from pyasn1.type import tag, univ, namedtype, namedval, constraint
+from pyasn1.type import tag, univ, namedtype, namedval, constraint, char
 from pyasn1.codec.der import encoder, decoder
 
 from twisted.logger import Logger
@@ -49,9 +49,13 @@ class BlobManager(object):
         mech_types = MechTypeList().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))
         mech_types.setComponentByPosition(0, univ.ObjectIdentifier('1.3.6.1.4.1.311.2.2.10'))
 
-        n = NegTokenInit().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))
+        hints = NegHints().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 3))
+        hints.setComponentByName('hintName', char.GeneralString(b'not_defined_in_RFC4178@please_ignore').subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 0)))
+        
+        n = NegTokenInit2().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))
         n.setComponentByName('mechTypes', mech_types)
-
+        n.setComponentByName('negHints', hints)
+        
         nt = NegotiationToken()
         nt.setComponentByName('negTokenInit', n)
 
@@ -73,7 +77,7 @@ class BlobManager(object):
         token = n.getComponentByName('mechToken')
         self.manager = ntlm.NTLMManager(self.domain)
         if token:
-            self.manager.receiveToken(token)        
+            self.manager.receiveToken(token.asOctets())
         else:
             log.warn("initial security blob has no token data.")
 
@@ -83,12 +87,12 @@ class BlobManager(object):
         
         @type blob: L{bytes}
         """   
-        d, _ = decoder.decode(data, asn1Spec = NegotiationToken())
+        d, _ = decoder.decode(blob, asn1Spec = NegotiationToken())
         nt = d.getComponentByName('negTokenResp')
         token = nt.getComponentByName('responseToken')
         if not token:
             raise base.SMBError('security blob does not contain responseToken field')
-        self.manager.receiveToken(token)
+        self.manager.receiveToken(token.asOctets())
         
     def generateChallengeBlob(self):
         """
@@ -101,6 +105,7 @@ class BlobManager(object):
         response_token = univ.OctetString(ntlm_data).subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 2))
         n = NegTokenResp().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1))
         n.setComponentByName('responseToken', response_token)
+        n.setComponentByName('supportedMech', univ.ObjectIdentifier('1.3.6.1.4.1.311.2.2.10').subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 1)))
         n.setComponentByName('negResult', RESULT_ACCEPT_INCOMPLETE)
         nt = NegotiationToken()
         nt.setComponentByName('negTokenResp', n)
@@ -168,8 +173,24 @@ class NegTokenInit(univ.Sequence):
         namedtype.OptionalNamedType('mechToken', univ.OctetString().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 2))),
         namedtype.OptionalNamedType('mechListMIC', univ.OctetString().subtype(implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 3)))
     )
-
-
+    
+    
+class NegHints(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.OptionalNamedType('hintName', char.GeneralString().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))),
+        namedtype.OptionalNamedType('hintAddress', univ.OctetString().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1)))
+)        
+    
+class NegTokenInit2(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.OptionalNamedType('mechTypes', MechTypeList().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))),
+        namedtype.OptionalNamedType('reqFlags', ContextFlags().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1))),
+        namedtype.OptionalNamedType('mechToken', univ.OctetString().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 2))),
+        namedtype.OptionalNamedType('negHints', NegHints().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 3))),
+        namedtype.OptionalNamedType('mechListMIC', univ.OctetString().subtype(implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 4)))
+    )
+    
+    
 class NegTokenResp(univ.Sequence):
     componentType = namedtype.NamedTypes(
         namedtype.OptionalNamedType('negResult', NegResultEnumerated().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 0))),

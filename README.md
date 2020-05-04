@@ -16,7 +16,9 @@ features like encryption will come later.
 
 ## Current Status
 
-Completely useless: only one packet type parsed so far. Under active development.
+Completely useless: only two packet type parsed so far. 
+It can complete protocol negotiation and authentication.
+Under active development.
 
 ## Prior Art
 
